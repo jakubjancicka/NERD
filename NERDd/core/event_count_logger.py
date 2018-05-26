@@ -2,13 +2,21 @@
 Module for counting number of various events.
 """
 
-import g
+from common import config
+import redis
 
+config_file = config.read_config("../etc/nerd/eventcountlogger.yml")
 # module variables
-redis_config = g.config.get("redis")
-all_groups = g.config.get("groups")
+redis_config = config_file.get("redis")
+redis_pool = redis.ConnectionPool(**redis_config)
+all_groups = config_file.get("groups")
 instantiated_groups = {}
 
+
+def test():
+    print("ECL Test:")
+    print(redis_config)
+    print()
 
 def get_group(name):
     """

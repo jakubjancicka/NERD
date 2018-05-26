@@ -94,6 +94,7 @@ def main():
     import modules.tags
     import modules.reputation
     import modules.whois
+    import modules.test_module_ECL
     
     # Instantiate modules
     # TODO create all modules automatically (loop over all modules.* and find all objects derived from NERDModule)
@@ -117,6 +118,7 @@ def main():
         modules.bgp_rank.CIRCL_BGPRank(),
         modules.event_type_counter.EventTypeCounter(),
         modules.tags.Tags(),
+        modules.test_module_ECL.ECLTest(),
     ]
     
     

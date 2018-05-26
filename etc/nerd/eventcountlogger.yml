@@ -1,0 +1,11 @@
+redis:
+    host: localhost  # optional, default: localhost
+    port: 6379  # optional, default: 6379
+    db: 1  # Redis DB used for statistics; optional, default: 1
+
+groups:
+    test_group:
+        eventids: ["event1", "event2", "event3"]
+        intervals: ["10s", "5m", "1h", "24h"]
+        sync_interval: 2  # synchronize local counters with redis after this number of seconds (may be float) (default: none)
+        sync_limit: 100 # synchronize local counters with redis when any counter in the group reaches this value (default: none)
