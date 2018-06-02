@@ -5,11 +5,12 @@ Module for counting number of various events.
 from common import config
 import redis
 from datetime import datetime
+from apscheduler.schedulers.background import BackgroundScheduler
 
 config_file = config.read_config("../etc/nerd/eventcountlogger.yml")
 # module variables
 redis_config = config_file.get("redis")
-redis_pool = redis.ConnectionPool(**redis_config)
+redis_db = redis.Redis(**redis_config)
 all_groups = config_file.get("groups")
 instantiated_groups = {}
 
@@ -18,6 +19,7 @@ def test():
     print("ECL Test:")
     print(redis_config)
     print()
+
 
 def get_group(name):
     """
@@ -48,8 +50,13 @@ class EventGroup:
         self.event_ids = this_group["eventids"]
         self.intervals = this_group["intervals"]
         self.use_local_counters = True
-        self.sync_interval = None if "sync_interval" not in this_group.keys() else this_group["sync_interval"]
+        self.sync_interval = None if "sync_interval" not in this_group.keys() else float(this_group["sync_interval"])
         self.sync_limit = None if "sync_limit" not in this_group.keys() else this_group["sync_limit"]
+
+        if self.sync_interval is not None:
+            self.scheduler = BackgroundScheduler()
+            self.scheduler.start()
+            self.scheduler.add_job(self.sync, 'interval', seconds=self.sync_interval)
 
         if self.sync_interval is None and self.sync_limit is None:
             self.use_local_counters = False
@@ -69,6 +76,8 @@ class EventGroup:
         else:
             self.counters = None
 
+        self.redis_pipe = redis_db.pipeline()
+
     def log_event(self, event_id, count=1):
         """
         Increment counter event_id in given group by count.
@@ -80,13 +89,12 @@ class EventGroup:
             if self.use_local_counters:
                 for interval in self.counters:
                     interval[event_id] += count
+                    if self.sync_limit is not None and interval[event_id] > self.sync_limit:
+                        self.sync()
             else:
-                server = redis.Redis(connection_pool=redis_pool)
                 for interval in self.intervals:
                     key = self.__create_redis_key(self.group_name, interval, True, event_id)
-                    current_value = server.get(key, event_id)
-                    current_value = 0 if current_value is None else int(current_value)
-                    server.set(key, current_value)
+                    self.__increment_redis_value(key, count)
         else:
             # some error
             pass
@@ -95,7 +103,7 @@ class EventGroup:
         """
         Return current sate of counter event_id (local one is used when local counters are enabled).
         :param event_id:
-        :return:
+        :return: Dictionary { "time_interval": counter_val, "next_interval" : ...}
         """
         if event_id in self.event_ids:
             ret_dict = {}
@@ -117,11 +125,10 @@ class EventGroup:
         :return:
         """
         if self.use_local_counters:
-            server = redis.Redis(connection_pool=redis_pool)
             for interval, value in self.counters:
                 for event_key, event_val in value:
                     key = self.__create_redis_key(self.group_name, interval, True, event_key)
-                    server.set(key, event_val)
+                    self.__increment_redis_value(key, value)
 
     def declare_event_id(self, event_id):
         """
@@ -161,3 +168,22 @@ class EventGroup:
         :return:
         """
         return int(datetime.now().timestamp())
+
+    def __increment_redis_value(self, key, value):
+        while 1:
+            try:
+                self.redis_pipe.watch(key)
+                current_val = self.redis_pipe.get(key)
+                current_val = value if current_val is None else current_val + value
+                self.redis_pipe.multi()
+                self.redis_pipe.set(key, current_val)
+                self.redis_pipe.execute()
+            except redis.WatchError:
+                continue
+            finally:
+                self.redis_pipe.reset()
+
+
+class EventCountLoggerMaster:
+    def __init__(self):
+        pass
