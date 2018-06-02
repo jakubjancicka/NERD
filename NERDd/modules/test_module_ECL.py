@@ -19,12 +19,7 @@ def separateProcess(num):
 
 class ECLTest(NERDModule):
     def __init__(self):
-        event_count_logger.test_var[0] = 0
         event_count_logger.test()
-        for i in range(5):
-            p = Process(target=separateProcess, args=(i,))
-            p.start()
-            sleep(0.5)
 
 
 

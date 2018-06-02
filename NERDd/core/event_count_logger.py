@@ -6,6 +6,8 @@ from common import config
 import redis
 from datetime import datetime
 from apscheduler.schedulers.background import BackgroundScheduler
+from multiprocessing import Process
+import re
 
 config_file = config.read_config("../etc/nerd/eventcountlogger.yml")
 # module variables
@@ -16,9 +18,11 @@ instantiated_groups = {}
 
 
 def test():
-    print("ECL Test:")
+    print("ECL Test:\nconfig:")
     print(redis_config)
-    print()
+    print("all_groups: ")
+    import json
+    print(json.dumps(all_groups, indent=2))
 
 
 def get_group(name):
@@ -60,17 +64,7 @@ class EventGroup:
 
         if self.sync_interval is None and self.sync_limit is None:
             self.use_local_counters = False
-        # local counters structure:
-        # {
-        #  "5m": {
-        #           "eventX": <count>,
-        #           "eventY": <count>
-        #        },
-        #  "1h": {
-        #           "eventX": <count>,
-        #           "eventY": <count>
-        #        }
-        # }
+        # local counters structure: { "5m": { "eventX": <count>, "eventY": <count> }, "1h": { "eventX": <count> ..} ..}
         if self.use_local_counters:
             self.counters = {interval: {x: 0 for x in self.event_ids} for interval in self.intervals}
         else:
@@ -93,7 +87,7 @@ class EventGroup:
                         self.sync()
             else:
                 for interval in self.intervals:
-                    key = self.__create_redis_key(self.group_name, interval, True, event_id)
+                    key = _create_redis_key(self.group_name, interval, True, event_id)
                     self.__increment_redis_value(key, count)
         else:
             # some error
@@ -127,7 +121,7 @@ class EventGroup:
         if self.use_local_counters:
             for interval, value in self.counters:
                 for event_key, event_val in value:
-                    key = self.__create_redis_key(self.group_name, interval, True, event_key)
+                    key = _create_redis_key(self.group_name, interval, True, event_key)
                     self.__increment_redis_value(key, value)
 
     def declare_event_id(self, event_id):
@@ -147,27 +141,8 @@ class EventGroup:
         for event_id in event_ids:
             self.declare_event_id(event_id)
 
-    def __create_redis_key(self, group, interval, is_current, event_id):
-        """
-        :param group: group name
-        :param interval: interval in seconds
-        :param is_current:
-        :param event_id:
-        :return:
-        """
-        type_str = 'cur' if is_current else 'last'
-
-        return ':'.join([str(group), interval, type_str, str(event_id)])
-
     def __update_redis_value(self, event_id, server):
         pass
-
-    def __get_current_time(self):
-        """
-        Returns current UTC Unix timestamp.
-        :return:
-        """
-        return int(datetime.now().timestamp())
 
     def __increment_redis_value(self, key, value):
         while 1:
@@ -186,4 +161,82 @@ class EventGroup:
 
 class EventCountLoggerMaster:
     def __init__(self):
+        self.scheduler = BackgroundScheduler()
+        self.redis_pipe = redis_db.pipeline()
+
+    def __run(self):
+        self.scheduler.start()
+        now = _get_current_time()
+        for group_name, group in all_groups:
+            for interval in group["intervals"]:
+                seconds = _int2sec(interval)
+                first_log_time = now + seconds - now % seconds
+                self.scheduler.add_job(lambda: self.__start_interval(group_name, interval, seconds),
+                                       'date',
+                                       run_date=datetime.fromtimestamp(first_log_time))
+
+    def __start_interval(self, group_name, interval, seconds):
+        self.scheduler.add_job(lambda: self.__process(group_name, interval), "interval", seconds=seconds)
+
+    def __process(self, group_name, interval):
+        for event_id in all_groups[group_name]["eventids"]:
+            curr_key = _create_redis_key(group_name, interval, True, event_id)
+            last_key = _create_redis_key(group_name, interval, False, event_id)
+            time_key = _create_redis_key(group_name, interval, True, "@ts")
+            while 1:
+                try:
+                    self.redis_pipe.watch(curr_key)
+                    current_val = self.redis_pipe.get(curr_key)
+                    self.redis_pipe.multi()
+                    if current_val is None:
+                        return
+                    self.redis_pipe.set(last_key, current_val)
+                    self.redis_pipe.set(curr_key, 0)
+                    self.redis_pipe.set(time_key, _get_current_time())
+                    self.redis_pipe.execute()
+                except redis.WatchError:
+                    continue
+                finally:
+                    self.redis_pipe.reset()
+
+    def start(self):
+        p = Process(target=self.__run)
+        p.start()
+        p.join()
+
+
+def _create_redis_key(group, interval, is_current, event_id):
+    """
+    :param group: group name
+    :param interval: interval in seconds
+    :param is_current:
+    :param event_id:
+    :return:
+    """
+    type_str = 'cur' if is_current else 'last'
+
+    return ':'.join([str(group), interval, type_str, str(event_id)])
+
+
+def _get_current_time():
+    """
+    Returns current UTC Unix timestamp.
+    :return:
+    """
+    return int(datetime.now().timestamp())
+
+
+def _int2sec(interval_str):
+    pattern = re.compile(r'^[-+]?\d*\.\d+|\d+[hHmMsS]$')
+    if pattern.match(interval_str):
+        number = float(re.search(r'[-+]?\d*\.\d+|\d+', interval_str).group())
+        char = str(re.search(r'[hHmMsS]', interval_str).group())
+        if char in ["h", "H"]:
+            return number * 3600
+        if char in ["m", "M"]:
+            return number * 60
+        else:
+            return number
+    else:
         pass
+        # some error
