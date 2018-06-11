@@ -152,46 +152,6 @@ class EventGroup:
         redis_server.incr(key, amount=value)
 
 
-class EventCountLoggerMaster:
-    def __init__(self):
-        self.scheduler = BackgroundScheduler()
-        self.redis_pipe = redis.Redis(redis_config).pipeline()
-        print( "MASTER {0}".format(self.redis_pipe.get("test_group1:10s:cur:event1")))
-
-    def run(self):
-        print("MASTER: Running")
-        # TODO this does not work at all
-        self.scheduler.start()
-        now = get_current_time()
-        for group_name, group in all_groups.items():
-            for interval in group["intervals"]:
-                seconds = int2sec(interval)
-                print("MASTER: Seconds: {0}, str: {1}".format(seconds, interval))
-                first_log_time = now + seconds - now % seconds
-                print("MASTER: Starting group {0} interval {1} in {2}s".format(group_name, interval,
-                                                                               seconds - now % seconds))
-                self.scheduler.add_job(lambda: self.__start_interval(group_name, interval, seconds),
-                                       'date',
-                                       run_date=datetime.fromtimestamp(first_log_time))
-
-    def __start_interval(self, group_name, interval, seconds):
-        print("MASTER: starting job for {0} every {1}s".format(group_name, seconds))
-        self.scheduler.add_job(lambda: self.__process(group_name, interval), "interval", seconds=seconds)
-
-    def __process(self, group_name, interval):
-        print("MASTER: processing")
-        for event_id in all_groups[group_name]["eventids"]:
-            curr_key = create_redis_key(group_name, interval, True, event_id)
-            last_key = create_redis_key(group_name, interval, False, event_id)
-            time_key = create_redis_key(group_name, interval, True, "@ts")
-
-            self.redis_pipe.setnx(curr_key, 0)
-            self.redis_pipe.rename(curr_key, last_key)
-            self.redis_pipe.set(curr_key, 0)
-            self.redis_pipe.set(time_key, get_current_time())
-            self.redis_pipe.execute()
-
-
 def create_redis_key(group, interval, is_current, event_id):
     """
     :param group: group name
