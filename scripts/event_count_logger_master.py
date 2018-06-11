@@ -68,16 +68,12 @@ class EventCountLoggerMaster:
                 first_log_time = now + seconds - now % seconds
                 print("MASTER: Starting group {0} interval {1} in {2}s".format(group_name, interval,
                                                                                seconds - now % seconds))
-                self.scheduler.add_job(self.__start_interval, 'date',
-                                       [group_name, interval, seconds], run_date=datetime.fromtimestamp(first_log_time),
-                                       max_instances=10)
+
+                self.scheduler.add_job(self.__process, "interval", [group_name, interval], seconds=seconds,
+                                       start_date=datetime.fromtimestamp(first_log_time))
 
         while 1:
             time.sleep(500)
-
-    def __start_interval(self, group_name, interval, seconds):
-        print("MASTER: starting job for {0} every {1}s ({2})".format(group_name, seconds, interval))
-        self.scheduler.add_job(self.__process, "interval", [group_name, interval], seconds=seconds, max_instances=10)
 
     def __process(self, group_name, interval):
         print("MASTER: processing")
@@ -85,7 +81,7 @@ class EventCountLoggerMaster:
             curr_key = create_redis_key(group_name, interval, True, event_id)
             last_key = create_redis_key(group_name, interval, False, event_id)
             time_key = create_redis_key(group_name, interval, True, "@ts")
-            print("processing event '{0}', in group '{1}'".format(event_id, group_name))
+            print("processing event '{0}', in group '{1}' with interval '{2}'".format(event_id, group_name, interval))
 
             self.redis_pipe.setnx(curr_key, 0)
             self.redis_pipe.rename(curr_key, last_key)
