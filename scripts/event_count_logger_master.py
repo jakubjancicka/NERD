@@ -2,14 +2,16 @@
 
 """
 import sys
-sys.path.append("../")
 import redis
 from apscheduler.schedulers.background import BackgroundScheduler
 from datetime import datetime
-from common import config
 import re
 import time
 import logging
+
+sys.path.append("../")
+from common import config
+
 
 config_file = config.read_config("../etc/nerd/eventcountlogger.yml")
 all_groups = config_file.get("groups")
@@ -56,7 +58,7 @@ def int2sec(interval_str):
 class EventCountLoggerMaster:
     def __init__(self):
         self.scheduler = BackgroundScheduler()
-        self.redis_pipe = redis.Redis(**redis_config).pipeline()
+        self.redis = redis.StrictRedis(**redis_config)
 
     def run(self):
         print("MASTER: Running")
@@ -72,8 +74,12 @@ class EventCountLoggerMaster:
                 self.scheduler.add_job(self.__process, "interval", [group_name, interval], seconds=seconds,
                                        start_date=datetime.fromtimestamp(first_log_time))
 
-        while 1:
-            time.sleep(500)
+        try:
+            while True:
+                time.sleep(500)
+        except (KeyboardInterrupt, SystemExit):
+            self.scheduler.shutdown()
+            return
 
     def __process(self, group_name, interval):
         print("MASTER: processing")
@@ -83,12 +89,12 @@ class EventCountLoggerMaster:
             time_key = create_redis_key(group_name, interval, True, "@ts")
             print("processing event '{0}', in group '{1}' with interval '{2}'".format(event_id, group_name, interval))
 
-            self.redis_pipe.setnx(curr_key, 0)
-            self.redis_pipe.rename(curr_key, last_key)
-            self.redis_pipe.set(curr_key, 0)
-            self.redis_pipe.set(time_key, get_current_time())
-
-            self.redis_pipe.execute()
+            pipe = self.redis.pipeline()
+            pipe.setnx(curr_key, 0)
+            pipe.rename(curr_key, last_key)
+            pipe.set(curr_key, 0)
+            pipe.set(time_key, get_current_time())
+            pipe.execute()
 
 
 ECLMaster = EventCountLoggerMaster()
