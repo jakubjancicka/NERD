@@ -17,6 +17,7 @@ redis_config = config_file.get("redis")
 redis_pool = redis.ConnectionPool(**redis_config)
 all_groups = config_file.get("groups")
 instantiated_groups = {}
+logger = logging.getLogger("event_count_logger")
 
 
 def test():
@@ -94,8 +95,7 @@ class EventGroup:
                     key = create_redis_key(self.group_name, interval, True, event_id)
                     self.__increment_redis_value(key, count)
         else:
-            # some error
-            pass
+            self.log.warning("Event {0} is not declared!".format(event_id))
 
     def get_count(self, event_id):
         """
@@ -105,16 +105,19 @@ class EventGroup:
         """
         if event_id in self.event_ids:
             ret_dict = {}
+            # get counts from redis
+            for interval in self.intervals:
+                key = create_redis_key(self.group_name, interval, True, event_id)
+                ret_dict[interval] = self.__get_redis_value(key)
+
+            # add local counts
             if self.use_local_counters:
-                for key, value in self.counters:
-                    ret_dict[key] = value[event_id]
-            else:
-                pass
+                for key, value in self.counters.items():
+                    ret_dict[key] += value[event_id]
 
             return ret_dict
         else:
-            # some error
-            pass
+            self.log.warning("Event {0} is not declared!".format(event_id))
 
     def sync(self):
         """
@@ -122,7 +125,6 @@ class EventGroup:
         (do nothing when local counters are not enabled).
         :return:
         """
-        self.log.info("Syncing...")
         if self.use_local_counters:
             for interval, value in self.counters.items():
                 for event_key, event_val in value.items():
@@ -146,6 +148,11 @@ class EventGroup:
         """
         for event_id in event_ids:
             self.declare_event_id(event_id)
+
+    def __get_redis_value(self, key):
+        redis_server = redis.Redis(connection_pool=redis_pool)
+        val = redis_server.get(key)
+        return int(val) if val else 0
 
     def __increment_redis_value(self, key, value):
         redis_server = redis.Redis(connection_pool=redis_pool)
@@ -185,5 +192,4 @@ def int2sec(interval_str):
         else:
             return number
     else:
-        pass
-        # some error
+        logger.warning("Interval string {0} does not match pattern '^[-+]?\d*\.\d+|\d+[hHmMsS]$'".format(interval_str))
