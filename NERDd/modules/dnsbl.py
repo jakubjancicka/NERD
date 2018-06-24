@@ -6,6 +6,7 @@ Requirements:
 """
 
 from core.basemodule import NERDModule
+from core import event_count_logger as ECL
 import g
 
 import ipaddress
@@ -16,6 +17,7 @@ import logging
 import threading
 from datetime import datetime, date, timezone
 
+interval_str = "2m"
 
 # From pycares example "cares-select.py"
 # https://github.com/saghul/pycares/blob/master/examples/cares-select.py
@@ -101,18 +103,29 @@ class DNSBLResolver(NERDModule):
         else:
             self.log.info("Using system default nameserver(s).")
 
-        # Limit number of requests per day to avoid getting blocked by blacklist
-        # providers
+        # ECL is used here for counting number of requests
+        # TODO remove
+        self.hidden_counter = 0
+        self.req_counter_group = ECL.get_group("DNSBL")
         if g.config.get('dnsbl.max_requests', None) and g.config.get('dnsbl.req_cnt_file', None):
             self.max_req_count = int(g.config.get('dnsbl.max_requests'))
             self.req_cnt_file = g.config.get('dnsbl.req_cnt_file')
             self.log.info("Maximal number of DNSBL requests per day set to {}.".format(self.max_req_count))
-        else:
-            self.max_req_count = float('inf')
-            self.req_cnt_file = None
-        self.req_counter = 0
-        self.req_counter_lock = threading.Lock() # query_blacklists() must be thread safe, therefore access to req_counter must use locking
-        
+        else:  # do not use request counter
+            self.req_counter_group = None
+
+        # # Limit number of requests per day to avoid getting blocked by blacklist
+        # # providers
+        # if g.config.get('dnsbl.max_requests', None) and g.config.get('dnsbl.req_cnt_file', None):
+        #     self.max_req_count = int(g.config.get('dnsbl.max_requests'))
+        #     self.req_cnt_file = g.config.get('dnsbl.req_cnt_file')
+        #     self.log.info("Maximal number of DNSBL requests per day set to {}.".format(self.max_req_count))
+        # else:
+        #     self.max_req_count = float('inf')
+        #     self.req_cnt_file = None
+        # self.req_counter = 0
+        # self.req_counter_lock = threading.Lock() # query_blacklists() must be thread safe, therefore access to req_counter must use locking
+
         bl_ids = (id for bl in self.blacklists for id in bl[2].values() )
 
         g.um.register_handler(
@@ -122,33 +135,38 @@ class DNSBLResolver(NERDModule):
             ('bl.'+id for id in bl_ids) # tuple/list/set of attributes the method may change
         )
         self.log.debug("DNSBLResolver initialized")
-    
-    
+
     def start(self):
-        today = date.today()
-        self.req_counter_current_date = today
-        if not self.req_cnt_file:
+        if not self.req_counter_group:
             return
-        # Load counter of DNS requests made
-        datestr = today.strftime("%Y%m%d")
-        try:
-            with open(self.req_cnt_file + datestr, "r") as f:
-                self.req_counter = int(f.read())
-        except (IOError, ValueError):
-            self.req_counter = 0
-            self.write_req_count()
-        if self.req_counter >= self.max_req_count:
-            self.log.warning("Maximal request count reached - no more DNSBL requests will be made today.")
-    
-    def write_req_count(self):
-        if not self.req_cnt_file:
-            return
-        # Store counter of DNS requests
-        datestr = date.today().strftime("%Y%m%d")
-        with open(self.req_cnt_file + datestr, "w") as f:
-            f.write(str(self.req_counter))
-    
-    stop = write_req_count # Store req_counter when NERD is going to stop
+        else:
+            current_cnt = self.req_counter_group.get_count("request")[interval_str]
+            if current_cnt > self.max_req_count:
+                self.log.warning("Maximal request count reached - no more DNSBL requests will be made today.")
+        # today = date.today()
+        # self.req_counter_current_date = today
+        # if not self.req_cnt_file:
+        #     return
+        # # Load counter of DNS requests made
+        # datestr = today.strftime("%Y%m%d")
+        # try:
+        #     with open(self.req_cnt_file + datestr, "r") as f:
+        #         self.req_counter = int(f.read())
+        # except (IOError, ValueError):
+        #     self.req_counter = 0
+        #     self.write_req_count()
+        # if self.req_counter >= self.max_req_count:
+        #     self.log.warning("Maximal request count reached - no more DNSBL requests will be made today.")
+
+    # def write_req_count(self):
+    #     if not self.req_cnt_file:
+    #         return
+    #     # Store counter of DNS requests
+    #     datestr = date.today().strftime("%Y%m%d")
+    #     with open(self.req_cnt_file + datestr, "w") as f:
+    #         f.write(str(self.req_counter))
+    #
+    # stop = write_req_count # Store req_counter when NERD is going to stop
     
     def query_blacklists(self, ekey, rec, updates):
         """
@@ -171,26 +189,35 @@ class DNSBLResolver(NERDModule):
         etype, key = ekey
         if etype != 'ip':
             return None
-        
+
+        current_cnt = self.req_counter_group.get_count("request")[interval_str]
+        if current_cnt > self.max_req_count:
+            self.log.warning("Maximal request count reached - no more DNSBL requests will be made today.")
+            return None
+        else:
+            self.hidden_counter += 1
+            print("hidden counter: {}".format(self.hidden_counter))
+            self.req_counter_group.log_event("request")
+
         req_time = datetime.utcnow()
-        
-        # Limit of the number of requests per day
-        with self.req_counter_lock:
-            # Increment request counter
-            self.req_counter += 1
-            # Reset counter when new day starts
-            if req_time.date() > self.req_counter_current_date:
-                self.write_req_count()
-                self.req_counter = 0
-                self.req_counter_current_date = req_time.date()
-            # Backup counter to file every 1000 requests
-            elif self.req_counter % 1000 == 0:
-                self.write_req_count()
-            # End processing if the limit was reached
-            if self.req_counter >= self.max_req_count:
-                if self.req_counter == self.max_req_count:
-                    self.log.warning("Maximal request count reached - no more DNSBL requests will be made today.")
-                return None
+        #
+        # # Limit of the number of requests per day
+        # with self.req_counter_lock:
+        #     # Increment request counter
+        #     self.req_counter += 1
+        #     # Reset counter when new day starts
+        #     if req_time.date() > self.req_counter_current_date:
+        #         self.write_req_count()
+        #         self.req_counter = 0
+        #         self.req_counter_current_date = req_time.date()
+        #     # Backup counter to file every 1000 requests
+        #     elif self.req_counter % 1000 == 0:
+        #         self.write_req_count()
+        #     # End processing if the limit was reached
+        #     if self.req_counter >= self.max_req_count:
+        #         if self.req_counter == self.max_req_count:
+        #             self.log.warning("Maximal request count reached - no more DNSBL requests will be made today.")
+        #         return None
         
         ip = ekey[1]
         revip = reverse_ip(ip)
